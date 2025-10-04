@@ -1,53 +1,215 @@
 /**
- * AI Club Assignment Tracker — Consolidated Script
- * - ICS import (with course extraction)
- * - Canvas API import (points, links, descriptions)
- * - Cleaners (fill Course, default times, points-from-notes, Days Left)
- * - Syllabus parsing via OpenAI (optional)
- * - Calendar sync
+ * Canvas Assignment Tracker — Streamlined Script
+ * - Canvas API comprehensive import (assignments, grades, weights, submission status)
+ * - Automatic data cleaning (default times, points extraction, days left calculation)
  */
 
 function onOpen() {
   SpreadsheetApp.getUi()
-    .createMenu('AI + Canvas')
-    .addItem('Import from Canvas (ICS)', 'uiImportIcs')
-    .addItem('Import from Canvas API (points)', 'uiImportFromCanvasApi')
+    .createMenu('Canvas Tracker')
+    .addItem('Import Everything from Canvas', 'uiImportFromCanvasApi')
+    .addSeparator()
+    .addItem('Refresh Dashboard', 'uiRefreshDashboard')
     .addSeparator()
     .addItem('Set Canvas Domain', 'uiSetCanvasDomain')
     .addItem('Set Canvas API Token', 'uiSetCanvasToken')
-    .addSeparator()
-    .addItem('Parse Syllabus/Text', 'uiParseSyllabus')
-    .addItem('Classify & Apply Weights', 'uiClassifyAndWeight')
-    .addSeparator()
-    .addItem('Clean Titles & Fill Course', 'cleanTitlesAndFillCourse')
-    .addItem('Autofill & Clean', 'autofillAndClean')
-    .addSeparator()
-    .addItem('Add to Google Calendar', 'uiAddToCalendar')
     .addToUi();
 }
 
 // ==== CONFIG ====
-const SHEET_NAME  = 'Assignments';
-const PASTE_SHEET = 'Paste';
+const RAW_DATA_SHEET = 'Raw Data';
+const DASHBOARD_SHEET = 'Dashboard';
 
-// Optional AI (only for syllabus parsing / policy mapping)
-const OPENAI_API_KEY = 'YOUR_OPENAI_KEY_HERE';
-const MODEL = 'gpt-4o';
 
 // ==== HELPERS ====
-function getSheet() {
+function getRawDataSheet() {
   const ss = SpreadsheetApp.getActive();
-  let sh = ss.getSheetByName(SHEET_NAME);
-  if (!sh) sh = ss.insertSheet(SHEET_NAME);
-  const headers = ['Course','Assignment Title','Type','Due Date','Due Time','Points','Category','Weight %','Source','Link','Status','Notes','Days Left'];
-  if (sh.getLastRow() === 0) sh.appendRow(headers);
+  let sh = ss.getSheetByName(RAW_DATA_SHEET);
+  if (!sh) sh = ss.insertSheet(RAW_DATA_SHEET);
+  
+  const headers = [
+    // Core Assignment Fields
+    'id', 'name', 'description', 'course_id', 'assignment_group_id', 'position',
+    // Dates & Times
+    'due_at', 'unlock_at', 'lock_at', 'created_at', 'updated_at',
+    // Points & Grading
+    'points_possible', 'grading_type', 'grading_standard_id', 'omit_from_final_grade',
+    // Submission Settings
+    'submission_types', 'allowed_extensions', 'allowed_attempts', 'annotatable_attachment_id',
+    // Status & Visibility
+    'published', 'muted', 'anonymous_submissions', 'anonymous_grading', 'anonymous_instructor_annotations',
+    'hide_in_gradebook', 'post_to_sis', 'integration_id', 'integration_data',
+    // Peer Reviews & Moderation
+    'peer_reviews', 'automatic_peer_reviews', 'peer_review_count', 'peer_reviews_assign_at',
+    'intra_group_peer_reviews', 'moderated_grading', 'grader_count', 'final_grader_id',
+    'grader_comments_visible_to_graders', 'graders_anonymous_to_graders', 'grader_names_visible_to_final_grader',
+    // External Tools & Plagiarism
+    'turnitin_enabled', 'vericite_enabled', 'turnitin_settings', 'external_tool_tag_attributes',
+    // Rubrics
+    'use_rubric_for_grading', 'rubric_settings', 'rubric', 'free_form_criterion_comments',
+    // URLs & Links
+    'html_url', 'submissions_download_url', 'quiz_id', 'discussion_topic',
+    // Assignment Group Info (from separate API call)
+    'assignment_group_name', 'group_weight',
+    // Submission Status (from submissions API)
+    'submission_workflow_state', 'submission_score', 'submission_grade', 'submission_submitted_at',
+    'submission_graded_at', 'submission_late', 'submission_missing', 'submission_excused',
+    // Calculated Fields
+    'days_until_due', 'is_overdue'
+  ];
+  
+  // Handle header setup - if sheet is empty or has wrong number of columns, reset headers
+  const currentCols = sh.getLastColumn();
+  const needsCols = headers.length;
+  
+  if (sh.getLastRow() === 0) {
+    // Empty sheet, just add headers
+    sh.appendRow(headers);
+  } else if (currentCols !== needsCols) {
+    // Existing sheet with wrong column count - update headers
+    if (currentCols < needsCols) {
+      sh.insertColumns(currentCols + 1, needsCols - currentCols);
+    }
+    sh.getRange(1, 1, 1, needsCols).setValues([headers]);
+  }
+  
   return sh;
 }
-function getPasteSheet() {
+
+function getDashboardSheet() {
   const ss = SpreadsheetApp.getActive();
-  let sh = ss.getSheetByName(PASTE_SHEET);
-  if (!sh) sh = ss.insertSheet(PASTE_SHEET);
+  let sh = ss.getSheetByName(DASHBOARD_SHEET);
+  if (!sh) {
+    sh = ss.insertSheet(DASHBOARD_SHEET);
+    setupDashboard_(sh);
+  }
   return sh;
+}
+
+function setupDashboard_(sh) {
+  // Clear existing content
+  sh.clear();
+  
+  // Set up dashboard layout
+  const headers = [
+    // Row 1: Title
+    ['CANVAS ASSIGNMENT TRACKER DASHBOARD', '', '', '', '', '', '', ''],
+    ['', '', '', '', '', '', '', ''],
+    
+    // Row 3: Course Summary Headers
+    ['COURSE SUMMARY', '', '', 'UPCOMING DEADLINES', '', '', 'OVERDUE ASSIGNMENTS', ''],
+    ['Course', 'Current Grade', 'Assignments Due', 'Assignment', 'Course', 'Due Date', 'Assignment', 'Days Overdue'],
+    
+    // Rows 5-14: Data rows (will be populated by formulas)
+    ['', '', '', '', '', '', '', ''],
+    ['', '', '', '', '', '', '', ''],
+    ['', '', '', '', '', '', '', ''],
+    ['', '', '', '', '', '', '', ''],
+    ['', '', '', '', '', '', '', ''],
+    ['', '', '', '', '', '', '', ''],
+    ['', '', '', '', '', '', '', ''],
+    ['', '', '', '', '', '', '', ''],
+    ['', '', '', '', '', '', '', ''],
+    ['', '', '', '', '', '', '', ''],
+    
+    // Row 15: Grade Analytics Headers
+    ['', '', '', '', '', '', '', ''],
+    ['GRADE ANALYTICS', '', '', 'ASSIGNMENT TYPE PERFORMANCE', '', '', 'WORKLOAD ANALYSIS', ''],
+    ['Total Points Earned', 'Total Points Possible', 'Overall GPA', 'Type', 'Avg Score', 'Count', 'This Week', 'Next Week'],
+    ['', '', '', '', '', '', '', ''],
+    ['', '', '', '', '', '', '', '']
+  ];
+  
+  // Set the data
+  sh.getRange(1, 1, headers.length, 8).setValues(headers);
+  
+  // Format the dashboard
+  formatDashboard_(sh);
+}
+
+function formatDashboard_(sh) {
+  // Title formatting
+  sh.getRange('A1:H1').merge().setHorizontalAlignment('center')
+    .setFontSize(16).setFontWeight('bold')
+    .setBackground('#4285f4').setFontColor('white');
+  
+  // Section headers
+  sh.getRange('A3').setFontWeight('bold').setBackground('#e8f0fe');
+  sh.getRange('D3').setFontWeight('bold').setBackground('#e8f0fe');
+  sh.getRange('G3').setFontWeight('bold').setBackground('#e8f0fe');
+  sh.getRange('A16').setFontWeight('bold').setBackground('#e8f0fe');
+  sh.getRange('D16').setFontWeight('bold').setBackground('#e8f0fe');
+  sh.getRange('G16').setFontWeight('bold').setBackground('#e8f0fe');
+  
+  // Column headers
+  sh.getRange('A4:H4').setFontWeight('bold').setBackground('#f8f9fa');
+  sh.getRange('A17:H17').setFontWeight('bold').setBackground('#f8f9fa');
+  
+  // Auto-resize columns
+  sh.autoResizeColumns(1, 8);
+  
+  // Add borders
+  sh.getRange('A1:H19').setBorder(true, true, true, true, true, true);
+}
+
+function updateDashboardFormulas_(dashboardSheet) {
+  const rawSheetName = RAW_DATA_SHEET;
+  
+  // Use simpler, more compatible formulas
+  try {
+    // Course Summary - Manually list some course IDs from your data
+    const courseIds = ['43899', '51304', '53553', '51269', '53554', '26518', '53480', '55444'];
+    
+    // Set course IDs manually for now
+    for (let i = 0; i < courseIds.length; i++) {
+      dashboardSheet.getRange(5 + i, 1).setValue(courseIds[i]);
+      
+      // Current Grade - Average submission scores for this course
+      dashboardSheet.getRange(5 + i, 2).setFormula(`=IFERROR(AVERAGEIF('${rawSheetName}'!D:D,"${courseIds[i]}",'${rawSheetName}'!BC:BC),"No grades")`);
+      
+      // Assignments Due - Count upcoming assignments for this course
+      dashboardSheet.getRange(5 + i, 3).setFormula(`=COUNTIFS('${rawSheetName}'!D:D,"${courseIds[i]}",'${rawSheetName}'!BH:BH,">0")`);
+    }
+    
+    // Grade Analytics - Total Points Earned
+    dashboardSheet.getRange('A18').setFormula(`=SUMPRODUCT(('${rawSheetName}'!BC:BC>0)*('${rawSheetName}'!BC:BC))`);
+    
+    // Total Points Possible
+    dashboardSheet.getRange('B18').setFormula(`=SUMPRODUCT(('${rawSheetName}'!L:L>0)*('${rawSheetName}'!L:L))`);
+    
+    // Overall GPA (percentage)
+    dashboardSheet.getRange('C18').setFormula(`=IF(B18>0,A18/B18*100,"No data")`);
+    
+    // Workload Analysis - This week (0-7 days)
+    dashboardSheet.getRange('G18').setFormula(`=COUNTIFS('${rawSheetName}'!BH:BH,">=0",'${rawSheetName}'!BH:BH,"<=7")`);
+    
+    // Next week (8-14 days)  
+    dashboardSheet.getRange('H18').setFormula(`=COUNTIFS('${rawSheetName}'!BH:BH,">7",'${rawSheetName}'!BH:BH,"<=14")`);
+    
+    // Add some upcoming deadlines manually
+    dashboardSheet.getRange('D5').setFormula(`=INDEX(FILTER('${rawSheetName}'!B:B,'${rawSheetName}'!BH:BH>0,'${rawSheetName}'!BH:BH<=7),1)`);
+    dashboardSheet.getRange('E5').setFormula(`=INDEX(FILTER('${rawSheetName}'!D:D,'${rawSheetName}'!BH:BH>0,'${rawSheetName}'!BH:BH<=7),1)`);
+    dashboardSheet.getRange('F5').setFormula(`=INDEX(FILTER('${rawSheetName}'!BH:BH,'${rawSheetName}'!BH:BH>0,'${rawSheetName}'!BH:BH<=7),1)`);
+    
+    // Add some overdue assignments
+    dashboardSheet.getRange('G5').setFormula(`=INDEX(FILTER('${rawSheetName}'!B:B,'${rawSheetName}'!BH:BH<0),1)`);
+    dashboardSheet.getRange('H5').setFormula(`=INDEX(FILTER('${rawSheetName}'!BH:BH,'${rawSheetName}'!BH:BH<0),1)`);
+    
+  } catch (error) {
+    console.log('Error applying dashboard formulas:', error);
+    
+    // Ultimate fallback - just show some basic stats
+    dashboardSheet.getRange('A18').setFormula(`=SUM('${rawSheetName}'!BC:BC)`);
+    dashboardSheet.getRange('B18').setFormula(`=SUM('${rawSheetName}'!L:L)`);
+    dashboardSheet.getRange('G18').setFormula(`=COUNTIF('${rawSheetName}'!BH:BH,"<=7")`);
+    dashboardSheet.getRange('H18').setFormula(`=COUNTIF('${rawSheetName}'!BH:BH,">7")`);
+  }
+}
+
+function uiRefreshDashboard() {
+  const dashboardSheet = getDashboardSheet();
+  updateDashboardFormulas_(dashboardSheet);
+  SpreadsheetApp.getUi().alert('Dashboard refreshed with latest data!');
 }
 function getBodyRange_(sh) {
   const lastRow = sh.getLastRow();
@@ -56,11 +218,20 @@ function getBodyRange_(sh) {
   return sh.getRange(2, 1, lastRow - 1, lastCol);
 }
 function writeRowsInBatches_(sh, startRow, values, batchSize) {
-  const lastCol = sh.getLastColumn();
+  if (!values.length) return;
+  
   const bs = batchSize || 300;
+  const dataColCount = values[0].length;
+  const sheetColCount = sh.getLastColumn();
+  
+  // If data has more columns than sheet, expand the sheet
+  if (dataColCount > sheetColCount) {
+    sh.insertColumns(sheetColCount + 1, dataColCount - sheetColCount);
+  }
+  
   for (let i = 0; i < values.length; i += bs) {
     const slice = values.slice(i, i + bs);
-    sh.getRange(startRow + i, 1, slice.length, lastCol).setValues(slice);
+    sh.getRange(startRow + i, 1, slice.length, dataColCount).setValues(slice);
     SpreadsheetApp.flush();
     Utilities.sleep(30);
   }
@@ -80,134 +251,11 @@ function guessTypeFromSummary(s) {
   return 'Other';
 }
 
-// ==== COURSE + TITLE EXTRACTION (from bracketed tail in SUMMARY) ====
-const COURSE_REGEX = /[A-Z]{2,6}-\d{2,4}(?:-[A-Z0-9]{2,4})?/; // e.g., CS-483-001, GEOL-101-P01
-function extractCourseAndCleanTitle_(rawTitle) {
-  if (!rawTitle) return { course: '', title: '' };
-  let title = String(rawTitle).replace(/\\,/g, ',').trim();
-
-  // collect all [ ... ] groups; pick first that contains a course code
-  const groups = [...title.matchAll(/\[([^\]]+)\]/g)].map(m => m[1]);
-  let course = '';
-  for (const g of groups) {
-    const inside = g.replace(/[()]/g, ' ');
-    const parts = inside.split(/[,;|]/).map(x => x.trim()).filter(Boolean);
-    for (const p of parts) {
-      const m = p.match(COURSE_REGEX);
-      if (m) { course = m[0]; break; }
-    }
-    if (course) break;
-  }
-  // strip final trailing [...] block for a cleaner title
-  title = title.replace(/\s*\[[^\]]+\]\s*$/, '').trim();
-  return { course, title };
-}
-
-// ==== ICS IMPORT ====
-function uiImportIcs() {
-  const ui = SpreadsheetApp.getUi();
-  const paste = getPasteSheet();
-  const fallback = paste.getRange('C3').getValue();
-  const resp = ui.prompt('Paste your Canvas ICS URL (or leave blank to use Paste!C3):');
-  let url = resp.getResponseText() || fallback;
-  if (!url) { ui.alert('No ICS URL provided.'); return; }
-  if (!/^https?:\/\//i.test(url)) { // guard if user pasted just the token
-    url = 'https://canvas.gmu.edu/feeds/calendars/' + url.replace(/^\/+/, '');
-  }
-  const ics = UrlFetchApp.fetch(url, {muteHttpExceptions:true}).getContentText();
-  importIcsToSheet(ics);
-  ui.alert('Canvas ICS import complete.');
-}
-function importIcsToSheet(icsText) {
-  const sh = getSheet();
-  const events = parseIcs_(icsText);
-  const rows = events.map(e => {
-    const { course, title } = extractCourseAndCleanTitle_(e.summary || '');
-    return [
-      course || '',
-      title || (e.summary || ''),
-      guessTypeFromSummary(title || e.summary || ''),
-      e.dt || '',
-      (e.time && e.time !== '00:00') ? e.time : '23:59',
-      '',
-      '',
-      '',
-      'Canvas ICS',
-      e.url || '',
-      'Not started',
-      e.desc || '',
-      ''
-    ];
-  });
-  if (!rows.length) return;
-  writeRowsInBatches_(sh, sh.getLastRow() + 1, rows, 300);
-}
-// robust ICS parser (handles folded lines)
-function parseIcs_(txt) {
-  const lines = txt.split(/\r?\n/);
-  const out = [];
-  let cur = null, lastProp = null;
-  const readVal = (line) => {
-    const idx = line.indexOf(':');
-    return idx >= 0 ? line.slice(idx + 1).trim() : '';
-  };
-  for (let i = 0; i < lines.length; i++) {
-    const ln = lines[i];
-    if (ln.startsWith('BEGIN:VEVENT')) { cur = {}; lastProp = null; continue; }
-    if (ln.startsWith('END:VEVENT'))   { if (cur) out.push(cur); cur = null; lastProp = null; continue; }
-    if (!cur) continue;
-
-    if (/^[ \t]/.test(ln) && lastProp) { // folded continuation line
-      cur[lastProp] = (cur[lastProp] || '') + ln.trim();
-      continue;
-    }
-
-    if (ln.startsWith('SUMMARY'))   { cur.summary = readVal(ln); lastProp = 'summary'; }
-    else if (ln.startsWith('DESCRIPTION')) { cur.desc = readVal(ln); lastProp = 'desc'; }
-    else if (ln.startsWith('URL'))  { cur.url = readVal(ln); lastProp = 'url'; }
-    else if (ln.startsWith('DTSTART')) {
-      const v = readVal(ln); // 20250920T235900Z
-      const yyyy = v.slice(0,4), mm = v.slice(4,6), dd = v.slice(6,8);
-      const hh = v.slice(9,11) || '00', mi = v.slice(11,13) || '00';
-      cur.dt = `${yyyy}-${mm}-${dd}`;
-      cur.time = `${hh}:${mi}`;
-      lastProp = 'dt';
-    } else lastProp = null;
-  }
-  return out;
-}
-
-// ==== CLEANERS ====
-function cleanTitlesAndFillCourse() {
+// ==== CLEANING HELPERS ====
+function autofillAndClean_() {
   const sh = getSheet();
   const body = getBodyRange_(sh);
-  if (!body) { SpreadsheetApp.getUi().alert('No rows to process.'); return; }
-
-  const header = sh.getRange(1,1,1,sh.getLastColumn()).getValues()[0];
-  const idx = (n) => header.indexOf(n);
-  const titleIdx  = idx('Assignment Title');
-  const courseIdx = idx('Course');
-
-  const values = body.getValues();
-  const bs = 300;
-  for (let off = 0; off < values.length; off += bs) {
-    const slice = values.slice(off, off + bs);
-    for (let r = 0; r < slice.length; r++) {
-      const { course, title } = extractCourseAndCleanTitle_(slice[r][titleIdx]);
-      if (course) slice[r][courseIdx] = course;
-      if (title)  slice[r][titleIdx]  = title;
-    }
-    sh.getRange(2 + off, 1, slice.length, header.length).setValues(slice);
-    SpreadsheetApp.flush();
-    Utilities.sleep(20);
-  }
-  SpreadsheetApp.getUi().alert('Titles cleaned & Course filled.');
-}
-
-function autofillAndClean() {
-  const sh = getSheet();
-  const body = getBodyRange_(sh);
-  if (!body) { SpreadsheetApp.getUi().alert('No rows to clean.'); return; }
+  if (!body) return;
 
   const header = sh.getRange(1,1,1,sh.getLastColumn()).getValues()[0];
   const idx = (n) => header.indexOf(n);
@@ -227,16 +275,20 @@ function autofillAndClean() {
   for (let off = 0; off < values.length; off += bs) {
     const slice = values.slice(off, off + bs);
     for (let r = 0; r < slice.length; r++) {
+      // Fix missing due times
       const t = (slice[r][dueTimeIdx] || '').toString();
       if (!t || t === '0:00' || t === '00:00') slice[r][dueTimeIdx] = '23:59';
 
+      // Copy type to category if category is empty
       const ty = (slice[r][typeIdx] || '').toString();
       if (ty && !slice[r][categoryIdx]) slice[r][categoryIdx] = ty;
 
+      // Extract points from notes if points field is empty
       const notes = (slice[r][notesIdx] || '').toString();
       const pm = notes.match(pointsRegex);
       if (pm && !slice[r][pointsIdx]) slice[r][pointsIdx] = pm[1];
 
+      // Add days left formula
       if (!slice[r][daysLeftIdx]) {
         const sheetRow = 2 + off + r;
         const dueCell = sh.getRange(sheetRow, dueDateIdx + 1).getA1Notation();
@@ -247,170 +299,6 @@ function autofillAndClean() {
     SpreadsheetApp.flush();
     Utilities.sleep(20);
   }
-  SpreadsheetApp.getUi().alert('Autofill complete.');
-}
-
-// ==== SYLLABUS (AI, optional) ====
-function uiParseSyllabus() {
-  const paste = getPasteSheet();
-  const course = Browser.inputBox('Course code (optional, e.g., CS 262)');
-  const text = paste.getRange('A3').getValue();
-  if (!text) { SpreadsheetApp.getUi().alert('Paste your syllabus text into Paste!A3 first.'); return; }
-  const items = aiExtractAssignments_(text);
-  const sh = getSheet();
-  const rows = items.map(it => ([
-    course || it.course || '',
-    it.title || '',
-    it.type || '',
-    it.due_date || '',
-    it.due_time || '',
-    it.points || '',
-    it.category || (it.type || ''),
-    it.weight || '',
-    'Syllabus AI',
-    it.link || '',
-    'Not started',
-    it.notes || '',
-    ''
-  ]));
-  if (rows.length) writeRowsInBatches_(sh, sh.getLastRow()+1, rows, 300);
-  SpreadsheetApp.getUi().alert('Syllabus parsing complete.');
-}
-function aiExtractAssignments_(rawText) {
-  const system = "You extract assignments from messy text. Return strict JSON:"+
-    "{\"assignments\":[{\"title\":\"\",\"type\":\"\",\"due_date\":\"\",\"due_time\":\"\",\"points\":\"\",\"link\":\"\",\"notes\":\"\"}],"+
-    "\"recurring\":[{\"title\":\"\",\"type\":\"\",\"weekday\":\"\",\"start_date\":\"\",\"end_date\":\"\",\"time\":\"\",\"notes\":\"\"}]}";
-  const user = "Text:\\n\"\"\""+rawText+"\"\"\"\\n\\nRules:\\n- Detect assignments with dates. If only month/day is given, infer the current academic year."+
-               "\\n- type ∈ {Homework, Quiz, Exam, Lab, Project, Reading, Other}\\n- If it says \"quiz every Sunday until Dec 8\", put it in recurring."+
-               "\\n- Prefer 24h time like \"23:59\"; if missing, leave empty.\\n- Return JSON only.";
-  const json = callOpenAI_(system, user);
-  let data = {assignments:[], recurring:[]};
-  try { data = JSON.parse(json); } catch(e) {}
-  const items = (data.assignments || []).map(a => ({
-    title: a.title || '',
-    type: a.type || '',
-    due_date: a.due_date || '',
-    due_time: a.due_time || '',
-    points: a.points || '',
-    link: a.link || '',
-    notes: a.notes || '',
-    category: a.type || '',
-    weight: ''
-  }));
-  for (const r of (data.recurring || [])) {
-    const expanded = expandWeekly_(r);
-    items.push(...expanded.map(dt => ({
-      title: r.title || '',
-      type: r.type || '',
-      due_date: dt,
-      due_time: r.time || '',
-      points: '',
-      link: '',
-      notes: r.notes || '',
-      category: r.type || '',
-      weight: ''
-    })));
-  }
-  return items;
-}
-function expandWeekly_(rec) {
-  try {
-    const start = new Date(rec.start_date);
-    const end = new Date(rec.end_date);
-    if (isNaN(start) || isNaN(end)) return [];
-    const dows = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
-    const targetDow = dows.indexOf(rec.weekday);
-    if (targetDow < 0) return [];
-    const dates = [];
-    let d = new Date(start);
-    while (d.getDay() !== targetDow) d.setDate(d.getDate()+1);
-    while (d <= end) {
-      const yyyy = d.getFullYear();
-      const mm = ('0'+(d.getMonth()+1)).slice(-2);
-      const dd = ('0'+d.getDate()).slice(-2);
-      dates.push(`${yyyy}-${mm}-${dd}`);
-      d.setDate(d.getDate()+7);
-    }
-    return dates;
-  } catch(e) { return []; }
-}
-function callOpenAI_(system, user) {
-  if (!OPENAI_API_KEY || OPENAI_API_KEY === 'YOUR_OPENAI_KEY_HERE') {
-    throw new Error('Set OPENAI_API_KEY before using AI features.');
-  }
-  const res = UrlFetchApp.fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'post',
-    contentType: 'application/json',
-    headers: { Authorization: 'Bearer ' + OPENAI_API_KEY },
-    payload: JSON.stringify({
-      model: MODEL,
-      response_format: { type: "json_object" },
-      messages: [{role:'system', content:system},{role:'user', content:user}]
-    }),
-    muteHttpExceptions: true
-  });
-  const data = JSON.parse(res.getContentText());
-  const content = data && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
-  if (!content) throw new Error('OpenAI response error:\n' + res.getContentText());
-  return content;
-}
-
-// ==== CLASSIFY & WEIGHTS ====
-function uiClassifyAndWeight() {
-  const paste = getPasteSheet();
-  const policy = paste.getRange('B3').getValue() || Browser.inputBox('Paste grading policy text (optional)');
-  const mapping = policy ? aiPolicyToCategories_(policy) : {};
-  applyCategoriesAndWeights_(mapping);
-  SpreadsheetApp.getUi().alert('Classification applied.');
-}
-function aiPolicyToCategories_(text) {
-  const system = "Turn grading policy text into JSON mapping of category to percent. Example:\\n{\"Homework\":20,\"Quizzes\":15,\"Midterm\":25,\"Final\":40}";
-  const user = "Policy:\\n" + text + "\\nReturn JSON only.";
-  try { return JSON.parse(callOpenAI_(system,user)); } catch(e) { return {}; }
-}
-function applyCategoriesAndWeights_(mapping) {
-  const sh = getSheet();
-  const body = getBodyRange_(sh);
-  if (!body) return;
-  const header = sh.getRange(1,1,1,sh.getLastColumn()).getValues()[0];
-  const idx = (n) => header.indexOf(n);
-  const typeIdx = idx('Type'), catIdx = idx('Category'), wtIdx = idx('Weight %');
-
-  const values = body.getValues();
-  for (let r = 0; r < values.length; r++) {
-    const type = (values[r][typeIdx]||'').toString();
-    let cat = values[r][catIdx] || type;
-    let weight = mapping[cat] ?? mapping[type] ?? mapping[type+'s'] ?? '';
-    values[r][catIdx] = cat;
-    values[r][wtIdx] = weight;
-  }
-  body.setValues(values);
-}
-
-// ==== GOOGLE CALENDAR SYNC ====
-function uiAddToCalendar() {
-  const cal = CalendarApp.getDefaultCalendar();
-  const sh = getSheet();
-  const body = getBodyRange_(sh);
-  if (!body) { SpreadsheetApp.getUi().alert('No dated rows.'); return; }
-  const header = sh.getRange(1,1,1,sh.getLastColumn()).getValues()[0];
-  const idx = (n) => header.indexOf(n);
-  const titleIdx = idx('Assignment Title'), dateIdx = idx('Due Date'), timeIdx = idx('Due Time'), notesIdx = idx('Notes'), linkIdx = idx('Link');
-
-  const values = body.getValues();
-  for (let i = 0; i < values.length; i++) {
-    const row = values[i];
-    const date = row[dateIdx];
-    if (!date) continue;
-    const t = row[timeIdx] ? row[timeIdx] : '23:59';
-    const parts = t.split(':');
-    const hh = Number(parts[0]||23), mm = Number(parts[1]||59);
-    const start = new Date(date); start.setHours(hh, mm, 0, 0);
-    const end = new Date(start.getTime()+60*60*1000);
-    const desc = (row[notesIdx]||'') + (row[linkIdx] ? `\n${row[linkIdx]}` : '');
-    cal.createEvent(row[titleIdx] || 'Assignment', start, end, {description: desc});
-  }
-  SpreadsheetApp.getUi().alert('Events added to your Google Calendar.');
 }
 
 // ==== CANVAS API (points, links) ====
@@ -470,7 +358,8 @@ function uiImportFromCanvasApi() {
   const ui = SpreadsheetApp.getUi();
   try { getCanvasToken_(); } catch (e) { ui.alert(e.message); return; }
 
-  const sh = getSheet();
+  const rawDataSheet = getRawDataSheet();
+  const dashboardSheet = getDashboardSheet();
   const courses = fetchCanvasJsonPaginated_('/courses', {
     enrollment_state: 'active',
     per_page: 100
@@ -479,40 +368,170 @@ function uiImportFromCanvasApi() {
   if (!courses.length) { ui.alert('No active courses found.'); return; }
 
   let rows = [];
+  let totalAssignments = 0;
+  let gradesFound = 0;
+
   for (const c of courses) {
     const courseLabel = (c.course_code || c.name || '').toString().trim();
     const courseId = c.id;
+    
+    // Get assignment groups with weights
+    const assignmentGroups = fetchCanvasJsonPaginated_(`/courses/${courseId}/assignment_groups`, { per_page: 100 });
+    const groupWeights = {};
+    const groupNames = {};
+    
+    for (const group of assignmentGroups) {
+      groupWeights[group.id] = group.group_weight || 0;
+      groupNames[group.id] = group.name || '';
+    }
+    
+    // Get assignments
     const assignments = fetchCanvasJsonPaginated_(`/courses/${courseId}/assignments`, { per_page: 100 });
+    
+    // Get current user ID for submissions
+    let userId = null;
+    try {
+      const userInfo = fetchCanvasJsonPaginated_('/users/self', {});
+      userId = userInfo[0]?.id;
+    } catch (e) {
+      console.log('Could not get user ID for submissions');
+    }
+    
     for (const a of assignments) {
-      if (!a || !a.due_at) continue; // skip undated
-      const d = new Date(a.due_at);
-      const yyyy = d.getFullYear();
-      const mm = ('0' + (d.getMonth()+1)).slice(-2);
-      const dd = ('0' + d.getDate()).slice(-2);
-      const hh = ('0' + d.getHours()).slice(-2);
-      const mi = ('0' + d.getMinutes()).slice(-2);
-      const title = a.name || '';
-      const type  = guessTypeFromSummary(title);
-      const points = (a.points_possible != null) ? a.points_possible : '';
+      if (!a) continue;
+      totalAssignments++;
+      
+      // Get assignment group info
+      const groupId = a.assignment_group_id;
+      const groupWeight = groupWeights[groupId] || '';
+      const groupName = groupNames[groupId] || '';
+      
+      // Get submission info if user ID available
+      let submission = null;
+      if (userId && a.id) {
+        try {
+          const submissions = fetchCanvasJsonPaginated_(`/courses/${courseId}/assignments/${a.id}/submissions/${userId}`, {});
+          submission = submissions[0];
+          if (submission && submission.score != null) {
+            gradesFound++;
+          }
+        } catch (e) {
+          // Submission fetch failed, continue without submission data
+        }
+      }
+      
+      // Calculate days until due and overdue status
+      let daysUntilDue = '';
+      let isOverdue = false;
+      if (a.due_at) {
+        const dueDate = new Date(a.due_at);
+        const today = new Date();
+        const diffTime = dueDate - today;
+        const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+        daysUntilDue = diffDays;
+        isOverdue = diffDays < 0;
+      }
+      
+      // Build comprehensive row with ALL Canvas assignment fields
       rows.push([
-        courseLabel,
-        title,
-        type,
-        `${yyyy}-${mm}-${dd}`,
-        `${hh}:${mi}`,
-        points,
-        '',
-        '',
-        'Canvas API',
+        // Core Assignment Fields
+        a.id || '',
+        a.name || '',
+        stripHtml_(a.description || ''),
+        a.course_id || '',
+        a.assignment_group_id || '',
+        a.position || '',
+        
+        // Dates & Times (keep as ISO strings for better compatibility)
+        a.due_at || '',
+        a.unlock_at || '',
+        a.lock_at || '',
+        a.created_at || '',
+        a.updated_at || '',
+        
+        // Points & Grading
+        a.points_possible != null ? a.points_possible : '',
+        a.grading_type || '',
+        a.grading_standard_id || '',
+        a.omit_from_final_grade || false,
+        
+        // Submission Settings
+        Array.isArray(a.submission_types) ? a.submission_types.join(', ') : (a.submission_types || ''),
+        Array.isArray(a.allowed_extensions) ? a.allowed_extensions.join(', ') : (a.allowed_extensions || ''),
+        a.allowed_attempts || '',
+        a.annotatable_attachment_id || '',
+        
+        // Status & Visibility
+        a.published || false,
+        a.muted || false,
+        a.anonymous_submissions || false,
+        a.anonymous_grading || false,
+        a.anonymous_instructor_annotations || false,
+        a.hide_in_gradebook || false,
+        a.post_to_sis || false,
+        a.integration_id || '',
+        a.integration_data || '',
+        
+        // Peer Reviews & Moderation
+        a.peer_reviews || false,
+        a.automatic_peer_reviews || false,
+        a.peer_review_count || '',
+        a.peer_reviews_assign_at || '',
+        a.intra_group_peer_reviews || false,
+        a.moderated_grading || false,
+        a.grader_count || '',
+        a.final_grader_id || '',
+        a.grader_comments_visible_to_graders || false,
+        a.graders_anonymous_to_graders || false,
+        a.grader_names_visible_to_final_grader || false,
+        
+        // External Tools & Plagiarism
+        a.turnitin_enabled || false,
+        a.vericite_enabled || false,
+        a.turnitin_settings ? JSON.stringify(a.turnitin_settings) : '',
+        a.external_tool_tag_attributes ? JSON.stringify(a.external_tool_tag_attributes) : '',
+        
+        // Rubrics
+        a.use_rubric_for_grading || false,
+        a.rubric_settings ? JSON.stringify(a.rubric_settings) : '',
+        a.rubric ? JSON.stringify(a.rubric) : '',
+        a.free_form_criterion_comments || false,
+        
+        // URLs & Links
         a.html_url || '',
-        'Not started',
-        (a.description && stripHtml_(a.description).slice(0, 2000)) || '',
-        ''
+        a.submissions_download_url || '',
+        a.quiz_id || '',
+        a.discussion_topic ? JSON.stringify(a.discussion_topic) : '',
+        
+        // Assignment Group Info
+        groupName,
+        groupWeight,
+        
+        // Submission Status
+        submission ? (submission.workflow_state || '') : '',
+        submission ? (submission.score != null ? submission.score : '') : '',
+        submission ? (submission.grade || '') : '',
+        submission ? (submission.submitted_at || '') : '',
+        submission ? (submission.graded_at || '') : '',
+        submission ? (submission.late || false) : false,
+        submission ? (submission.missing || false) : false,
+        submission ? (submission.excused || false) : false,
+        
+        // Calculated Fields
+        daysUntilDue,
+        isOverdue
       ]);
     }
   }
-  if (!rows.length) { ui.alert('No dated assignments found via API.'); return; }
-  writeRowsInBatches_(sh, sh.getLastRow() + 1, rows, 300);
-  autofillAndClean(); // now defined
-  ui.alert(`Imported ${rows.length} assignments from Canvas API (with points).`);
+  
+  if (!rows.length) { ui.alert('No assignments found via API.'); return; }
+  
+  writeRowsInBatches_(rawDataSheet, rawDataSheet.getLastRow() + 1, rows, 300);
+  
+  // Update dashboard with formulas
+  updateDashboardFormulas_(dashboardSheet);
+  
+  ui.alert(`Imported ${rows.length} assignments from Canvas API.\n` +
+           `Found grades for ${gradesFound} assignments.\n` +
+           `Assignment weights automatically applied.`);
 }
