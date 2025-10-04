@@ -154,56 +154,79 @@ function formatDashboard_(sh) {
 
 function updateDashboardFormulas_(dashboardSheet) {
   const rawSheetName = RAW_DATA_SHEET;
-  
-  // Use simpler, more compatible formulas
-  try {
-    // Course Summary - Manually list some course IDs from your data
-    const courseIds = ['43899', '51304', '53553', '51269', '53554', '26518', '53480', '55444'];
-    
-    // Set course IDs manually for now
-    for (let i = 0; i < courseIds.length; i++) {
-      dashboardSheet.getRange(5 + i, 1).setValue(courseIds[i]);
-      
-      // Current Grade - Average submission scores for this course
-      dashboardSheet.getRange(5 + i, 2).setFormula(`=IFERROR(AVERAGEIF('${rawSheetName}'!D:D,"${courseIds[i]}",'${rawSheetName}'!BC:BC),"No grades")`);
-      
-      // Assignments Due - Count upcoming assignments for this course
-      dashboardSheet.getRange(5 + i, 3).setFormula(`=COUNTIFS('${rawSheetName}'!D:D,"${courseIds[i]}",'${rawSheetName}'!BH:BH,">0")`);
-    }
-    
-    // Grade Analytics - Total Points Earned
-    dashboardSheet.getRange('A18').setFormula(`=SUMPRODUCT(('${rawSheetName}'!BC:BC>0)*('${rawSheetName}'!BC:BC))`);
-    
-    // Total Points Possible
-    dashboardSheet.getRange('B18').setFormula(`=SUMPRODUCT(('${rawSheetName}'!L:L>0)*('${rawSheetName}'!L:L))`);
-    
-    // Overall GPA (percentage)
-    dashboardSheet.getRange('C18').setFormula(`=IF(B18>0,A18/B18*100,"No data")`);
-    
-    // Workload Analysis - This week (0-7 days)
-    dashboardSheet.getRange('G18').setFormula(`=COUNTIFS('${rawSheetName}'!BH:BH,">=0",'${rawSheetName}'!BH:BH,"<=7")`);
-    
-    // Next week (8-14 days)  
-    dashboardSheet.getRange('H18').setFormula(`=COUNTIFS('${rawSheetName}'!BH:BH,">7",'${rawSheetName}'!BH:BH,"<=14")`);
-    
-    // Add some upcoming deadlines manually
-    dashboardSheet.getRange('D5').setFormula(`=INDEX(FILTER('${rawSheetName}'!B:B,'${rawSheetName}'!BH:BH>0,'${rawSheetName}'!BH:BH<=7),1)`);
-    dashboardSheet.getRange('E5').setFormula(`=INDEX(FILTER('${rawSheetName}'!D:D,'${rawSheetName}'!BH:BH>0,'${rawSheetName}'!BH:BH<=7),1)`);
-    dashboardSheet.getRange('F5').setFormula(`=INDEX(FILTER('${rawSheetName}'!BH:BH,'${rawSheetName}'!BH:BH>0,'${rawSheetName}'!BH:BH<=7),1)`);
-    
-    // Add some overdue assignments
-    dashboardSheet.getRange('G5').setFormula(`=INDEX(FILTER('${rawSheetName}'!B:B,'${rawSheetName}'!BH:BH<0),1)`);
-    dashboardSheet.getRange('H5').setFormula(`=INDEX(FILTER('${rawSheetName}'!BH:BH,'${rawSheetName}'!BH:BH<0),1)`);
-    
-  } catch (error) {
-    console.log('Error applying dashboard formulas:', error);
-    
-    // Ultimate fallback - just show some basic stats
-    dashboardSheet.getRange('A18').setFormula(`=SUM('${rawSheetName}'!BC:BC)`);
-    dashboardSheet.getRange('B18').setFormula(`=SUM('${rawSheetName}'!L:L)`);
-    dashboardSheet.getRange('G18').setFormula(`=COUNTIF('${rawSheetName}'!BH:BH,"<=7")`);
-    dashboardSheet.getRange('H18').setFormula(`=COUNTIF('${rawSheetName}'!BH:BH,">7")`);
+  const rawSheet = getRawDataSheet();
+  const rawValues = rawSheet.getDataRange().getValues();
+
+  // Bail out gracefully if there is no data to build formulas from
+  if (rawValues.length <= 1) {
+    dashboardSheet.getRange('A5:H18').clearContent();
+    return;
   }
+
+  const header = rawValues[0];
+  const courseColLetter = 'D'; // course_id
+  const assignmentNameLetter = 'B';
+  const dueDateLetter = 'G';
+  const daysUntilDueLetter = 'BJ';
+  const submissionScoreLetter = 'BC';
+  const pointsPossibleLetter = 'L';
+
+  const courseIndex = header.indexOf('course_id');
+  const courseIds = Array.from(new Set(
+    rawValues
+      .slice(1)
+      .map(row => row[courseIndex])
+      .filter(id => id !== '' && id !== null && id !== undefined)
+  ));
+
+  const maxSummaryRows = 10;
+  const firstSummaryRow = 5;
+
+  // Clear the dashboard body before writing fresh formulas
+  dashboardSheet.getRange(firstSummaryRow, 1, maxSummaryRows, 8).clearContent();
+
+  // --- COURSE SUMMARY ---
+  courseIds.slice(0, maxSummaryRows).forEach((courseId, idx) => {
+    const targetRow = firstSummaryRow + idx;
+    const escapedCourseId = courseId.toString().replace(/"/g, '""');
+
+    dashboardSheet.getRange(targetRow, 1).setValue(courseId);
+    dashboardSheet.getRange(targetRow, 2).setFormula(`=IFERROR(AVERAGEIF('${rawSheetName}'!${courseColLetter}:${courseColLetter},"${escapedCourseId}",'${rawSheetName}'!${submissionScoreLetter}:${submissionScoreLetter}),"No grades")`);
+    dashboardSheet.getRange(targetRow, 3).setFormula(`=IFERROR(COUNTIFS('${rawSheetName}'!${courseColLetter}:${courseColLetter},"${escapedCourseId}",'${rawSheetName}'!${daysUntilDueLetter}:${daysUntilDueLetter},">0"),0)`);
+  });
+
+  // --- UPCOMING DEADLINES (next 7 days) ---
+  for (let i = 0; i < maxSummaryRows; i++) {
+    const targetRow = firstSummaryRow + i;
+    const offset = targetRow - 4; // ROW()-4 gives 1 for the first data row
+    const upcomingSource = `SORT(FILTER({'${rawSheetName}'!${assignmentNameLetter}:${assignmentNameLetter},'${rawSheetName}'!${courseColLetter}:${courseColLetter},'${rawSheetName}'!${dueDateLetter}:${dueDateLetter},'${rawSheetName}'!${daysUntilDueLetter}:${daysUntilDueLetter}},'${rawSheetName}'!${daysUntilDueLetter}:${daysUntilDueLetter}>0,'${rawSheetName}'!${daysUntilDueLetter}:${daysUntilDueLetter}<=7),4,TRUE)`;
+
+    dashboardSheet.getRange(targetRow, 4).setFormula(`=IFERROR(INDEX(${upcomingSource},${offset},1),"")`);
+    dashboardSheet.getRange(targetRow, 5).setFormula(`=IF($D${targetRow}="","",IFERROR(INDEX(${upcomingSource},${offset},2),""))`);
+    dashboardSheet.getRange(targetRow, 6).setFormula(`=IF($D${targetRow}="","",IFERROR(INDEX(${upcomingSource},${offset},3),""))`);
+  }
+
+  // --- OVERDUE ASSIGNMENTS ---
+  for (let i = 0; i < maxSummaryRows; i++) {
+    const targetRow = firstSummaryRow + i;
+    const offset = targetRow - 4;
+    const overdueSource = `SORT(FILTER({'${rawSheetName}'!${assignmentNameLetter}:${assignmentNameLetter},ABS('${rawSheetName}'!${daysUntilDueLetter}:${daysUntilDueLetter})},'${rawSheetName}'!${daysUntilDueLetter}:${daysUntilDueLetter}<0),2,FALSE)`;
+
+    dashboardSheet.getRange(targetRow, 7).setFormula(`=IFERROR(INDEX(${overdueSource},${offset},1),"")`);
+    dashboardSheet.getRange(targetRow, 8).setFormula(`=IF($G${targetRow}="","",IFERROR(INDEX(${overdueSource},${offset},2),""))`);
+  }
+
+  // --- GRADE ANALYTICS ---
+  dashboardSheet.getRange('A18').setFormula(`=SUMPRODUCT(('${rawSheetName}'!${submissionScoreLetter}:${submissionScoreLetter}>0)*('${rawSheetName}'!${submissionScoreLetter}:${submissionScoreLetter}))`);
+  dashboardSheet.getRange('B18').setFormula(`=SUMPRODUCT(('${rawSheetName}'!${pointsPossibleLetter}:${pointsPossibleLetter}>0)*('${rawSheetName}'!${pointsPossibleLetter}:${pointsPossibleLetter}))`);
+  dashboardSheet.getRange('C18').setFormula(`=IF(B18>0,A18/B18*100,"No data")`);
+
+  const typeColumnLetter = 'P'; // submission_types column
+  dashboardSheet.getRange('D18').setFormula(`=IFERROR(QUERY({'${rawSheetName}'!${typeColumnLetter}:${typeColumnLetter},'${rawSheetName}'!${submissionScoreLetter}:${submissionScoreLetter}},"select Col1, AVG(Col2), COUNT(Col2) where Col1 is not null group by Col1 label AVG(Col2) '', COUNT(Col2) ''",0),"")`);
+
+  // --- WORKLOAD ANALYSIS ---
+  dashboardSheet.getRange('G18').setFormula(`=COUNTIFS('${rawSheetName}'!${daysUntilDueLetter}:${daysUntilDueLetter},">=0",'${rawSheetName}'!${daysUntilDueLetter}:${daysUntilDueLetter},"<=7")`);
+  dashboardSheet.getRange('H18').setFormula(`=COUNTIFS('${rawSheetName}'!${daysUntilDueLetter}:${daysUntilDueLetter},">7",'${rawSheetName}'!${daysUntilDueLetter}:${daysUntilDueLetter},"<=14")`);
 }
 
 function uiRefreshDashboard() {
